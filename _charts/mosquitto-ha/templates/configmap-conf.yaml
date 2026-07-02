@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-conf
+  namespace: {{ .Release.Namespace }}
+data:
+  mosquitto.conf: |
+    listener {{ .Values.service.mqttPort }}
+    # No local persistence by design — Redis is the only durable store (see
+    # entrypoint.sh's leader-election + replay-retain.sh); an active pod can be
+    # replaced by either passive sibling with no data locality concerns.
+    persistence false
+    # v1 has no auth wired up yet (matches the rest of this installer's "plain
+    # secrets/no CSI yet" stance) — anonymous access, not for untrusted networks.
+    allow_anonymous true
+    log_dest stdout
+    {{- if .Values.tls.enabled }}
+    # Server-side TLS only — encrypts the connection, clients still connect
+    # without a client certificate (no mTLS). Cert comes from OpenBao's PKI
+    # engine, see 10-mqtt-mosquitto/Install.ps1.
+    listener {{ .Values.tls.port }}
+    cafile {{ .Values.tls.caFile }}
+    certfile {{ .Values.tls.certFile }}
+    keyfile {{ .Values.tls.keyFile }}
+    {{- end }}

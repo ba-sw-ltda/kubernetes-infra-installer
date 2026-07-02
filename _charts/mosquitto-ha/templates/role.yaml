@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+rules:
+  # Restricted to this StatefulSet's own (stable, predictable) pod names — a pod
+  # can only ever relabel itself or its known siblings, never arbitrary pods.
+  - apiGroups: [""]
+    resources: ["pods"]
+    resourceNames:
+      {{- range $i := until (int .Values.replicaCount) }}
+      - {{ printf "%s-%d" $.Release.Name $i }}
+      {{- end }}
+    verbs: ["get", "patch", "update"]

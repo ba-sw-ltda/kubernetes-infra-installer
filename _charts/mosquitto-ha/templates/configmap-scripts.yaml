@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-scripts
+  namespace: {{ .Release.Namespace }}
+data:
+  entrypoint.sh: |
+{{ .Files.Get "scripts/entrypoint.sh" | indent 4 }}
+  renew-lease.sh: |
+{{ .Files.Get "scripts/renew-lease.sh" | indent 4 }}
+  replay-retain.sh: |
+{{ .Files.Get "scripts/replay-retain.sh" | indent 4 }}
+  retain-sync.sh: |
+{{ .Files.Get "scripts/retain-sync.sh" | indent 4 }}

@@ -1,0 +1,45 @@
+replicaCount: 3
+
+image:
+  repository: ""    # set via --set at install time (custom-built image, see 10-mqtt-mosquitto/image/)
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecret: ""    # optional, only needed when pulling from a private registry (RKE2/cloud)
+
+redis:
+  host: ""          # required, e.g. redis-master.shared-infra.svc.cluster.local
+  port: 6379
+  username: "default"  # ACL username — "default" matches a non-ACL Redis too
+  password: ""          # literal fallback, only used when passwordFile is empty
+  passwordFile: ""       # preferred: path to a CSI/Vault-mounted file, e.g. /vault/secrets/mosquitto
+  leaderKey: "mosquitto:leader"
+  leaderTtlMs: 15000
+  retainPrefix: "mqtt:retain:"
+
+service:
+  type: ClusterIP   # set to LoadBalancer for external exposure
+  mqttPort: 1883
+  annotations: {}    # e.g. metallb.universe.tf/address-pool, for a fixed LoadBalancer IP
+
+# Server-side TLS (port 8883) using a cert issued from OpenBao's PKI engine —
+# see 10-mqtt-mosquitto/Install.ps1. Encrypts the connection only, not mTLS —
+# clients still connect without a client certificate.
+tls:
+  enabled: false
+  port: 8883
+  certFile: ""
+  keyFile: ""
+  caFile: ""
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 32Mi
+
+# Generic passthrough, same convention Bitnami charts use — lets New-CsiSecretMount's
+# returned HelmArgs (--set extraVolumes[0]..., extraVolumeMounts[0]...) work here too.
+extraVolumes: []
+extraVolumeMounts: []

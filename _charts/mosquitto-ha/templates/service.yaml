@@ -1,0 +1,42 @@
+# Headless Service required by the StatefulSet (stable per-pod DNS) — not used
+# for client traffic.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-headless
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: {{ .Release.Name }}
+  ports:
+    - name: mqtt
+      port: {{ .Values.service.mqttPort }}
+---
+# Client-facing Service: selects only the pod currently labeled active (patched
+# onto itself by entrypoint.sh after winning the Redis leader lock) — exactly
+# one matching pod at a time, giving clients one stable address that's always
+# the live broker.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  {{- if .Values.service.annotations }}
+  annotations:
+    {{- toYaml .Values.service.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ .Release.Name }}
+    mqtt-role: active
+  ports:
+    - name: mqtt
+      port: {{ .Values.service.mqttPort }}
+      targetPort: mqtt
+    {{- if .Values.tls.enabled }}
+    - name: mqtts
+      port: {{ .Values.tls.port }}
+      targetPort: mqtts
+    {{- end }}

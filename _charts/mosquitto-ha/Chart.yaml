@@ -1,0 +1,10 @@
+apiVersion: v2
+name: mosquitto-ha
+description: >
+  Custom active/passive/passive Eclipse Mosquitto with a Redis-backed shared
+  store for retained messages and leader election. No public chart provides
+  this (vanilla Mosquitto has no clustering/HA of its own) — see
+  10-mqtt-mosquitto/README.md for the design and its accepted limitations.
+type: application
+version: 0.1.0
+appVersion: "2.0"

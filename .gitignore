@@ -1,0 +1,28 @@
+# Cluster connection state files — contain IPs, tokens, credentials
+.rke2-state.json
+.aks-state.json
+.eks-state.json
+.gke-state.json
+.kind-state.json
+.openbao-state.json
+.openbao-state-*.json
+.ingress-ip
+
+# Generated kubeconfig copies
+*.kubeconfig
+
+# Downloaded CLI tools — fetched automatically by Install-Infra.ps1
+.tools/
+
+# PowerShell session artifacts
+*.ps1xml
+
+# Claude Code project memory
+.claude/
+
+# Editor
+.vscode/
+*.code-workspace
+
+# Reference copy of the baseline installer — not part of this repo
+Kubernetes.BaseLine/
