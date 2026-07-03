@@ -4,8 +4,9 @@
 .DESCRIPTION
     Counterpart to Install-Infra.ps1. Never touches the cluster itself (no node/cluster
     deletion, no DNS/hosts cleanup) — it only removes the Helm releases this installer
-    deployed, using each component's Uninstall.ps1 when present. Always operates on the
-    fixed "shared-infra" namespace.
+    deployed, using each component's Uninstall.ps1 when present. Resolves each component's
+    namespace by name convention (mqtt/redis), same as Install-Infra.ps1's
+    Get-ComponentNamespace.
 #>
 [CmdletBinding()]
 param()
@@ -18,6 +19,18 @@ trap {
     Write-Host "`n`n  Error: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "  At: $($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor DarkGray
     exit 1
+}
+
+function Get-ComponentNamespace {
+    <#
+    .SYNOPSIS
+        Maps a component folder name (e.g. "10-mqtt-emqx", "21-redis-insight") to its
+        namespace group ("mqtt" / "redis"), by name convention alone — no config lookup.
+    #>
+    param([Parameter(Mandatory)][string]$FolderName)
+    if ($FolderName -match 'mqtt')  { return "mqtt" }
+    if ($FolderName -match 'redis') { return "redis" }
+    throw "Get-ComponentNamespace: no namespace group known for component '$FolderName'"
 }
 
 Write-Host "`n========================================" -ForegroundColor Red
@@ -45,9 +58,8 @@ if (-not $platform) { exit 0 }
 
 Set-ClusterContext -BaseDir $PSScriptRoot -Platform $platform
 
-# ── 2. Fixed shared-infra namespace (no per-instance selection here) ────
-$namespace = "shared-infra"
-Write-Host "  Namespace: $namespace" -ForegroundColor Gray
+# ── 2. Fixed, function-grouped namespaces (no per-instance selection here) ──
+Write-Host "  Namespaces: mqtt, redis" -ForegroundColor Gray
 
 # ── 3. Discover installed infra components ───────────────────────────────
 $componentDirs = Get-ChildItem -Path $PSScriptRoot -Directory |
@@ -82,6 +94,7 @@ if ($null -eq $selectedFolders -or $selectedFolders.Count -eq 0) {
 Write-Host ""
 foreach ($c in ($components | Where-Object { $selectedFolders -contains $_.FolderName })) {
     Write-Host "--- Removing: $($c.DisplayName) ---" -ForegroundColor Magenta
+    $namespace = Get-ComponentNamespace -FolderName $c.FolderName
     if (Test-Path $c.UninstallScript) {
         & $c.UninstallScript -Platform $platform -Namespace $namespace
         if ($LASTEXITCODE -ne 0) { Write-Warning "  ⚠ Uninstall.ps1 for '$($c.DisplayName)' returned a non-zero exit code — continuing" }

@@ -12,7 +12,8 @@
       - checks prerequisites (ingress, cert-manager, secrets backend, storage) against the
         live cluster before offering components that depend on them
     Unlike the per-tenant Navios App-Installer, every component here installs once per
-    cluster into a single fixed "shared-infra" namespace — there's no per-instance
+    cluster into one of a small set of fixed, function-grouped namespaces (mqtt, redis —
+    see Get-ComponentNamespace) rather than a single shared one — there's no per-instance
     namespace prompt.
 #>
 [CmdletBinding()]
@@ -31,6 +32,18 @@ trap {
     Write-Host "  Stack trace:" -ForegroundColor DarkGray
     $_.ScriptStackTrace -split "`n" | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
     exit 1
+}
+
+function Get-ComponentNamespace {
+    <#
+    .SYNOPSIS
+        Maps a component folder name (e.g. "10-mqtt-emqx", "21-redis-insight") to its
+        namespace group ("mqtt" / "redis"), by name convention alone — no config lookup.
+    #>
+    param([Parameter(Mandatory)][string]$FolderName)
+    if ($FolderName -match 'mqtt')  { return "mqtt" }
+    if ($FolderName -match 'redis') { return "redis" }
+    throw "Get-ComponentNamespace: no namespace group known for component '$FolderName'"
 }
 
 function Connect-ExistingAksCluster {
@@ -490,50 +503,54 @@ function Start-InfraInstallation {
     [Console]::ReadKey($true) | Out-Null
 
     Write-Section -Title "Step 3: Checking Cluster Prerequisites — $platform" `
-        -Hint "Creates the shared-infra namespace and checks ingress, cert-manager, secrets backend, and storage class against the live cluster" `
+        -Hint "Creates the mqtt/redis namespaces (Rancher project 'Shared Infrastructure') and checks ingress, cert-manager, secrets backend, and storage class against the live cluster" `
         -Current $uiContext
     Write-Host ""
     Write-Host "Checking prerequisites" -ForegroundColor Cyan
     Write-Host ""
-    # Fixed, cluster-wide namespace — every infra component installs once per
-    # cluster here, unlike the per-tenant Navios App-Installer which creates one
-    # navios-<kuerzel> namespace per Anlage instance. No prompt, no state file.
-    # Checked (and created only if missing) right alongside the other
-    # prerequisites below — it's a one-time, once-per-cluster setup step,
-    # not substantial enough to warrant its own page.
-    $namespace = "shared-infra"
+    # Every infra component installs into one of a small set of fixed,
+    # cluster-wide namespaces here, grouped by function (mqtt/redis) rather
+    # than one shared "shared-infra" namespace — unlike the per-tenant Navios
+    # App-Installer which creates one navios-<kuerzel> namespace per Anlage
+    # instance. No prompt, no state file. Get-ComponentNamespace (below) maps
+    # each component folder to its group; both namespaces are ensured (and
+    # assigned to the Rancher project "Shared Infrastructure") right
+    # alongside the other prerequisites — a one-time, once-per-cluster setup
+    # step, not substantial enough to warrant its own page.
+    $namespaces = @("mqtt", "redis")
 
     # Invoke-ScriptBlockWithSpinner's background job has no access to this
     # session's env vars, so PATH/KUBECONFIG must be forwarded explicitly
     # (Invoke-WithSpinner does this automatically; this one doesn't) — same
-    # pattern as Kubernetes.DSA's namespace-creation step.
-    $namespaceExists = Invoke-ScriptBlockWithSpinner -Message "Checking namespace..." -ScriptBlock {
-        param($path, $kubeconfig, $ns)
-        $env:PATH = $path
-        if ($kubeconfig) { $env:KUBECONFIG = $kubeconfig }
-        & kubectl get namespace $ns 2>$null | Out-Null
-        $LASTEXITCODE -eq 0
-    } -ArgumentList @($env:PATH, $env:KUBECONFIG, $namespace)
-
-    if ($namespaceExists) {
-        Write-Host "  ✓ namespace" -ForegroundColor Green
-    } else {
-        $nsResult = Invoke-ScriptBlockWithSpinner -Message "Creating namespace..." -ScriptBlock {
+    # pattern as Kubernetes.DSA's namespace-creation step. Project lookup/
+    # create-and-assign itself is shared (powershell-cluster-bootstrap's
+    # Set-RancherProjectAssignment) rather than duplicated inline here.
+    foreach ($namespace in $namespaces) {
+        $namespaceExists = Invoke-ScriptBlockWithSpinner -Message "Checking namespace '$namespace'..." -ScriptBlock {
             param($path, $kubeconfig, $ns)
             $env:PATH = $path
             if ($kubeconfig) { $env:KUBECONFIG = $kubeconfig }
-            $out = & kubectl create namespace $ns --dry-run=client -o yaml 2>&1 | & kubectl apply -f - 2>&1
-            [PSCustomObject]@{ Output = $out; ExitCode = $LASTEXITCODE }
+            & kubectl get namespace $ns 2>$null | Out-Null
+            $LASTEXITCODE -eq 0
         } -ArgumentList @($env:PATH, $env:KUBECONFIG, $namespace)
-        if ($nsResult.ExitCode -ne 0) { Write-Error "Failed to create namespace '$namespace': $($nsResult.Output)"; exit 1 }
-        Write-Host "  ✓ namespace (created)" -ForegroundColor Green
-    }
 
-    # Carry the namespace along in the kubectl context itself, not just as a
-    # PowerShell variable — every subsequent kubectl command (ours or one the
-    # user types by hand while debugging) defaults to it without needing -n.
-    & kubectl config set-context --current --namespace=$namespace 2>&1 | Out-Null
-    $uiContext.Namespace = $namespace
+        if ($namespaceExists) {
+            Write-Host "  ✓ namespace '$namespace'" -ForegroundColor Green
+        } else {
+            $nsResult = Invoke-ScriptBlockWithSpinner -Message "Creating namespace '$namespace'..." -ScriptBlock {
+                param($path, $kubeconfig, $ns)
+                $env:PATH = $path
+                if ($kubeconfig) { $env:KUBECONFIG = $kubeconfig }
+                $out = & kubectl create namespace $ns --dry-run=client -o yaml 2>&1 | & kubectl apply -f - 2>&1
+                [PSCustomObject]@{ Output = $out; ExitCode = $LASTEXITCODE }
+            } -ArgumentList @($env:PATH, $env:KUBECONFIG, $namespace)
+            if ($nsResult.ExitCode -ne 0) { Write-Error "Failed to create namespace '$namespace': $($nsResult.Output)"; exit 1 }
+            Write-Host "  ✓ namespace '$namespace' (created)" -ForegroundColor Green
+        }
+
+        Set-RancherProjectAssignment -Namespace $namespace -ProjectName "Shared Infrastructure"
+    }
+    $uiContext.Namespace = ($namespaces -join " / ")
 
     # Each remaining prereq is checked and reported individually — its own
     # spinner, then its own immediate ✓/✗ result — same pattern as the
@@ -671,7 +688,8 @@ function Start-InfraInstallation {
         if (Test-Path $c.PromptScript) {
             # -Domain/-Namespace passed unconditionally — components that don't need
             # a hostname just leave the corresponding Prompt.ps1 param unused.
-            $inputs = & $c.PromptScript -Platform $platform -Domain $domain -Namespace $namespace
+            $componentNamespace = Get-ComponentNamespace -FolderName $c.FolderName
+            $inputs = & $c.PromptScript -Platform $platform -Domain $domain -Namespace $componentNamespace
             if ($inputs) { $componentInputs[$c.FolderName] = $inputs }
         }
     }
@@ -706,8 +724,24 @@ function Start-InfraInstallation {
             Write-Warning "  ⚠ Install script not found: $($c.InstallScript)"
             continue
         }
+        # If this component belongs to a RadioGroup, uninstall any previously-
+        # installed sibling first. Each sibling's Uninstall.ps1 has a chart
+        # identity guard that makes it a safe no-op when a different chart (or
+        # nothing) is under that release name, so this is unconditionally safe.
+        $componentNamespace = Get-ComponentNamespace -FolderName $c.FolderName
+        if ($c.RadioGroup) {
+            $siblings = @($components | Where-Object { $_.RadioGroup -eq $c.RadioGroup -and $_.FolderName -ne $c.FolderName })
+            foreach ($sibling in $siblings) {
+                $siblingUninstall = Join-Path (Split-Path $sibling.ConfigPath -Parent) "Uninstall.ps1"
+                if (Test-Path $siblingUninstall) {
+                    Write-Host "  Checking if $($sibling.DisplayName) needs to be removed first..." -ForegroundColor Gray
+                    & $siblingUninstall -Platform $platform -Namespace (Get-ComponentNamespace -FolderName $sibling.FolderName)
+                }
+            }
+        }
+
         $promptArgs = if ($componentInputs.ContainsKey($c.FolderName)) { $componentInputs[$c.FolderName] } else { @{} }
-        & $c.InstallScript -Platform $platform -Namespace $namespace @extraArgs @promptArgs
+        & $c.InstallScript -Platform $platform -Namespace $componentNamespace @extraArgs @promptArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Error "  ✗ $($c.DisplayName) installation failed — aborting"
             exit 1

@@ -55,19 +55,20 @@ $ChartPath  = Join-Path $BaseDir $FullConfig.ChartPath
 # Secret exists for it at any point — see the "Redis ACL credentials" design
 # notes (NIS2/CRA — no long-lived Secret copy of these credentials in etcd).
 $redisConfig = Import-PowerShellDataFile -Path (Join-Path $BaseDir "20-redis\Config.psd1")
-$redisName   = $redisConfig.Name
-$RedisHost   = "$redisName-master.$Namespace.svc.cluster.local"
-$RedisPort   = "6379"
-$redisAclUser = "mosquitto"
-$vaultPath    = "$Namespace/redis-acl-users"
+$redisName      = $redisConfig.Name
+$RedisNamespace = "redis"   # fixed function-grouped namespace (see Install-Infra.ps1's Get-ComponentNamespace) — distinct from this component's own "$Namespace" (mqtt)
+$RedisHost      = "$redisName-master.$RedisNamespace.svc.cluster.local"
+$RedisPort      = "6379"
+$redisAclUser   = "mosquitto"
+$vaultPath      = "$RedisNamespace/redis-acl-users"
 
 Write-Host "  Namespace:  $Namespace" -ForegroundColor Gray
 Write-Host "  Redis:      ${RedisHost}:${RedisPort}" -ForegroundColor Gray
 Write-Host "  Exposure:   $(if ($ExternalExposure) { 'LoadBalancer' } else { 'ClusterIP' })" -ForegroundColor Gray
 Write-Host ""
 
-& kubectl get svc "$redisName-master" -n $Namespace 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Error "Redis Service '$redisName-master' nicht gefunden in Namespace '$Namespace' — wurde 20-redis installiert?"; exit 1 }
+& kubectl get svc "$redisName-master" -n $RedisNamespace 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Error "Redis Service '$redisName-master' nicht gefunden in Namespace '$RedisNamespace' — wurde 20-redis installiert?"; exit 1 }
 
 if (-not (Read-ClusterSecret -Path $vaultPath -Key $redisAclUser -Platform $Platform -BaseDir $BaseDir)) {
     Write-Error "Redis ACL user '$redisAclUser' nicht in Vault gefunden ('$vaultPath') — wurde 20-redis installiert?"

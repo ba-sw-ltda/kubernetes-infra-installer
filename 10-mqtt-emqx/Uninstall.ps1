@@ -18,6 +18,20 @@ Set-ClusterContext -BaseDir $BaseDir -Platform $Platform
 
 $Config = Import-PowerShellDataFile -Path (Join-Path $PSScriptRoot "Config.psd1")
 
+# Guard: only skip if a *different* chart is installed under the shared
+# release name (Mosquitto won the RadioGroup selection instead). If no release
+# exists at all (already removed, or never installed), fall through and run
+# the idempotent cleanup below anyway — CSI/Vault residue can outlive the
+# Helm release and still needs to be reversed.
+$expectedChart  = $Config.ChartName   # "emqx"
+$releaseJson    = & helm get metadata $Config.Name --namespace $Namespace --output json 2>$null
+$releaseObj     = if ($releaseJson) { try { $releaseJson | ConvertFrom-Json } catch { $null } } else { $null }
+$installedChart = if ($releaseObj) { $releaseObj.chart } else { $null }
+if ($installedChart -and $installedChart -ne $expectedChart) {
+    Write-Host "  ⚠ Release '$($Config.Name)' has chart '$installedChart' (expected '$expectedChart') — skipping" -ForegroundColor Yellow
+    exit 0
+}
+
 # Remove dependent components first (MQTT Explorer connects to this broker)
 $dependentScript = Join-Path $BaseDir "11-mqtt-explorer\Uninstall.ps1"
 if (Test-Path $dependentScript) {
@@ -31,6 +45,13 @@ if ($LASTEXITCODE -eq 0) {
 } else {
     Write-Host "  ⚠ Release '$($Config.Name)' not found (already removed?)" -ForegroundColor Yellow
 }
+
+# Reverses New-CsiSecretMount's auth-side setup for the TLS CSI mount (AppName
+# "emqx-tls") plus its SecretProviderClass — applied outside the Helm release,
+# so helm uninstall never touches them. Also removes the Vault-stored server
+# cert itself, which is owned solely by this component.
+Remove-CsiSecretMount -AppName "emqx-tls" -Namespace $Namespace -ServiceAccount $Config.Name -Platform $Platform -BaseDir $BaseDir | Out-Null
+Remove-ClusterSecret -Path "$Namespace/emqx-tls" -Platform $Platform -BaseDir $BaseDir | Out-Null
 
 # persistence.enabled creates a PVC via the StatefulSet's volumeClaimTemplates
 # — helm uninstall never removes those, only the StatefulSet itself. Matched
