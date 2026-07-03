@@ -1,17 +1,17 @@
 <#
 .SYNOPSIS
-    Thin wrapper: re-exports the powershell-cluster-bootstrap submodule's tool
-    installation, cluster connect, and cloud secret-writing functions.
+    Thin wrapper: re-exports the powershell-cluster-bootstrap sibling module's
+    tool installation, cluster connect, and cloud secret-writing functions.
 #>
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-Import-Module (Join-Path $PSScriptRoot "powershell-cluster-bootstrap\PowerShellClusterBootstrap.psd1") -Force -Verbose:$false
+Import-Module (Join-Path $PSScriptRoot "..\..\powershell-cluster-bootstrap\PowerShellClusterBootstrap.psd1") -Force -Verbose:$false
 
 # Keep the project-local .tools\ convention (downloaded kubectl/helm/kind/plink
-# binaries live next to this repo checkout) instead of the submodule's default
-# shared %LOCALAPPDATA% cache.
+# binaries live next to this repo checkout) instead of the sibling module's
+# default shared %LOCALAPPDATA% cache.
 Set-ClusterBootstrapToolsDir -Path (Join-Path $PSScriptRoot "..\.tools")
 
 Export-ModuleMember -Function @(
@@ -28,6 +28,8 @@ Export-ModuleMember -Function @(
   'Get-AksIngressIp'
   'Get-EksIngressIp'
   'Get-IngressClass'
+  'Set-RancherProjectAssignment'
+  'Remove-RancherProjectAssignment'
   'Initialize-AksCluster'
   'Initialize-EksCluster'
   'Initialize-GkeCluster'
