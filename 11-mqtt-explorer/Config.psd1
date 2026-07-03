@@ -9,6 +9,8 @@
     # Gates this component on the ClusterSecretStore 'cluster-secrets' being
     # Ready (Test-SecretsBackendPresent) — its admin password is provisioned
     # through Vault/CSI, not a plain Secret (see Install.ps1).
+    DefaultSelected = $false
+    RequiresGroups  = @("mqtt-broker")
     RequiredPrereqs = @("secrets-backend")
 
     # User-configurable settings

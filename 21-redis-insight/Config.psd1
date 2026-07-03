@@ -2,12 +2,13 @@
     Name             = "redis-insight"
     DisplayName      = "Redis Insight (Web UI)"
     Namespace        = "shared-infra"
+    DefaultSelected  = $false
     RequiredPrereqs  = @("ingress", "secrets-backend", "storage")
     RequiresComponents = @("20-redis")
 
     UserConfig = @{
         Image        = "redis/redisinsight"
-        Version      = "2.64.0"
+        Version      = "2.70.1"
         Port         = 5540
         SidecarImage = "alpine/k8s:1.31.4"
 

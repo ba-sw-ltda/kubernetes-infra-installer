@@ -591,7 +591,8 @@ function Start-InfraInstallation {
             RadioGroup         = $config.RadioGroup
             RadioGroupLabel    = $config.RadioGroupLabel
             RadioDefault       = [bool]$config.RadioDefault
-            RequiresComponents = @($config.RequiresComponents)
+            DefaultSelected    = if ($config.Keys -contains 'DefaultSelected') { [bool]$config.DefaultSelected } else { $true }
+            RequiresComponents = @($config.RequiresComponents) + @($config.RequiresGroups | ForEach-Object { "__group_$_`__" })
         }
     }
 
@@ -629,7 +630,7 @@ function Start-InfraInstallation {
             Write-Host "  ⚠ $($c.DisplayName) not available (missing: $($c.MissingPrereqs -join ', '))" -ForegroundColor Yellow
             continue
         }
-        $sectionItems.Add(@{ Label = $c.DisplayName; Value = $c.FolderName; Type = "check"; Default = $true; Requires = $c.RequiresComponents }) | Out-Null
+        $sectionItems.Add(@{ Label = $c.DisplayName; Value = $c.FolderName; Type = "check"; Default = $c.DefaultSelected; Requires = $c.RequiresComponents }) | Out-Null
     }
 
     if ($sectionItems.Count -eq 0) {

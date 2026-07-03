@@ -21,6 +21,7 @@ $Name = $Config.Name
 
 Write-Host "  Removing MQTT Explorer..." -ForegroundColor Cyan
 & kubectl delete deployment/$Name service/$Name persistentvolumeclaim/$Name ingress/$Name `
+    configmap/$Name-init-script `
     -n $Namespace --ignore-not-found 2>&1 | Out-Null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "  ✓ MQTT Explorer removed" -ForegroundColor Green

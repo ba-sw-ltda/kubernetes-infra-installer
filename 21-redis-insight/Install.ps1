@@ -127,7 +127,7 @@ watch_rotation() {
     sleep "${POLL_INTERVAL}"
     CURRENT_HASH="$(sha256sum "${VAULT_FILE}" | cut -d' ' -f1)"
     if [ "${CURRENT_HASH}" != "${LAST_HASH}" ] && [ -n "${DB_ID}" ]; then
-      log "Secret rotated — updating Redis Insight connection..."
+      log "Secret rotated - updating Redis Insight connection..."
       PASSWORD="$(cat "${VAULT_FILE}")"
       PATCH=$(jq -n --arg pw "${PASSWORD}" '{"password":$pw}')
       curl -sf -X PATCH "${RI_URL}/api/databases/${DB_ID}" \
@@ -145,7 +145,7 @@ watch_rotation
 
 $scriptTmp = New-TemporaryFile
 try {
-    Set-Content -Path $scriptTmp.FullName -Value $syncScript -Encoding UTF8
+    [System.IO.File]::WriteAllText($scriptTmp.FullName, $syncScript.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
     & kubectl create configmap "$Name-sidecar-script" -n $Namespace `
         --from-file="sync.sh=$($scriptTmp.FullName)" `
         --dry-run=client -o yaml 2>&1 | & kubectl apply -f - 2>&1 | Out-Null
@@ -183,6 +183,8 @@ metadata:
     app.kubernetes.io/name: $Name
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: $Name
@@ -192,9 +194,14 @@ spec:
         app.kubernetes.io/name: $Name
     spec:
       serviceAccountName: $Name
+      securityContext:
+        fsGroup: 1000
       containers:
       - name: redis-insight
         image: "$($UserConfig.Image):$($UserConfig.Version)"
+        env:
+        - name: RI_ACCEPT_TERMS_AND_CONDITIONS
+          value: "true"
         ports:
         - name: http
           containerPort: $($UserConfig.Port)

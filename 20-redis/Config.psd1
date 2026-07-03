@@ -9,6 +9,7 @@
     # Gates this component on the ClusterSecretStore 'cluster-secrets' being
     # Ready (Test-SecretsBackendPresent) — needed because ACL credentials are
     # provisioned through Vault/CSI, not a chart-managed password anymore.
+    DefaultSelected = $false
     RequiredPrereqs = @("secrets-backend")
 
     # Redis ACL users provisioned alongside the "default" superuser — one

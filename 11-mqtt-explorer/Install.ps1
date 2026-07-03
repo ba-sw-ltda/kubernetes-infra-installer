@@ -46,6 +46,46 @@ Write-Host "  Namespace:  $Namespace" -ForegroundColor Gray
 Write-Host "  Broker:     ${BrokerHost}:${BrokerPort}" -ForegroundColor Gray
 Write-Host ""
 
+# ── 1. Init-script ConfigMap ──────────────────────────────────────────────────
+# The initContainer runs this script on every pod start.
+# Real settings key is "ConnectionManager_connections" (not "connections").
+# Connections are stored as an object keyed by connection id.
+# grep-check on our specific id: if missing → overwrite with our broker only
+# (removes demo connections); if already present → preserve file untouched.
+# Single-quoted PS here-string: $ belongs to the shell, not PowerShell.
+# BROKER_HOST is injected via env var from the initContainer spec below.
+$initScript = @'
+#!/bin/sh
+SETTINGS="/app/data/settings.json"
+CONN_KEY="mqtt-broker-shared-infra"
+CONN_JSON=$(printf '{"configVersion":1,"certValidation":true,"clientId":"mqtt-explorer-shared-infra","id":"%s","name":"MQTT Broker (shared-infra)","encryption":false,"subscriptions":[{"topic":"#","qos":0},{"topic":"$SYS/#","qos":0}],"type":"mqtt","host":"%s","port":1883,"protocol":"mqtt"}' \
+  "$CONN_KEY" "$BROKER_HOST")
+
+if [ ! -f "$SETTINGS" ]; then
+  # Fresh install: create file with our broker only
+  printf '{"ConnectionManager_connections":{"%s":%s}}\n' "$CONN_KEY" "$CONN_JSON" > "$SETTINGS"
+  echo "[init-settings] Created settings with pre-configured broker"
+elif ! grep -q "\"$CONN_KEY\"" "$SETTINGS"; then
+  # File exists (has other connections) but our broker is missing: inject it.
+  # sed: insert our entry after the opening brace of ConnectionManager_connections.
+  sed -i "s|\"ConnectionManager_connections\":{|\"ConnectionManager_connections\":{\"$CONN_KEY\":$CONN_JSON,|" "$SETTINGS"
+  echo "[init-settings] Injected broker into existing settings"
+else
+  echo "[init-settings] Broker already present, preserving existing settings"
+fi
+'@
+$initTmp = New-TemporaryFile
+try {
+    [System.IO.File]::WriteAllText($initTmp.FullName, $initScript.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+    & kubectl create configmap "$Name-init-script" -n $Namespace `
+        --from-file="init.sh=$($initTmp.FullName)" `
+        --dry-run=client -o yaml 2>&1 | & kubectl apply -f - 2>&1 | Out-Null
+} finally {
+    Remove-Item $initTmp.FullName -Force -ErrorAction SilentlyContinue
+}
+if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create init-script ConfigMap"; exit 1 }
+Write-Host "  ✓ Init-script ConfigMap ready" -ForegroundColor Green
+
 $manifests = @"
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -75,6 +115,21 @@ spec:
       labels:
         app.kubernetes.io/name: $Name
     spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: init-settings
+          image: busybox:1.36
+          command: ["/bin/sh", "/init-scripts/init.sh"]
+          env:
+            - name: BROKER_HOST
+              value: "$BrokerHost"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: init-script
+              mountPath: /init-scripts
+              readOnly: true
       containers:
         - name: mqtt-explorer
           image: "$($FullConfig.Image):$($FullConfig.Version)"
@@ -82,10 +137,8 @@ spec:
             - name: http
               containerPort: $($UserConfig.Port)
           env:
-            - name: MQTT_EXPLORER_DEFAULT_BROKER_HOST
-              value: "$BrokerHost"
-            - name: MQTT_EXPLORER_DEFAULT_BROKER_PORT
-              value: "$BrokerPort"
+            - name: MQTT_EXPLORER_SKIP_AUTH
+              value: "true"
           volumeMounts:
             - name: data
               mountPath: /app/data
@@ -100,6 +153,10 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: $Name
+        - name: init-script
+          configMap:
+            name: $Name-init-script
+            defaultMode: 0755
 ---
 apiVersion: v1
 kind: Service
