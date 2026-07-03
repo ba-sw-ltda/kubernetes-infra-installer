@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Thin wrapper: re-exports the powershell-menu-ui submodule's interactive
+    Thin wrapper: re-exports the powershell-menu-ui sibling module's interactive
     console UI primitives, plus Infra-specific Vault/CSI secret handling and
     Config.psd1 loading that have no generic-library equivalent.
 #>
@@ -8,7 +8,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-Import-Module (Join-Path $PSScriptRoot "powershell-menu-ui\PowerShellMenuUI.psd1") -Force -Verbose:$false
+Import-Module (Join-Path $PSScriptRoot "..\..\powershell-menu-ui\PowerShellMenuUI.psd1") -Force -Verbose:$false
 
 # Module-level base directory — one level up from _lib/.
 # All functions use this as default so callers never need to pass -BaseDir or -Platform.

@@ -1,6 +1,0 @@
-[submodule "_lib/powershell-menu-ui"]
-	path = _lib/powershell-menu-ui
-	url = https://github.com/ba-sw-ltda/powershell-menu-ui.git
-[submodule "_lib/powershell-cluster-bootstrap"]
-	path = _lib/powershell-cluster-bootstrap
-	url = https://github.com/ba-sw-ltda/powershell-cluster-bootstrap.git
