@@ -31,6 +31,27 @@ tls:
   keyFile: ""
   caFile: ""
 
+# MQTT client authentication (username/password). Password is never plaintext
+# in values/ConfigMap — it's read at container start from a CSI/Vault-mounted
+# file (passwordFile) and hashed into a mosquitto password_file by
+# entrypoint.sh. When disabled, the broker allows anonymous access.
+auth:
+  enabled: false
+  username: "explorer"
+  passwordFile: ""   # path to CSI-mounted plaintext password, e.g. /vault/mqtt-auth/explorer
+
+# Mutual-TLS listener on its own port, separate from the auth/tls listeners
+# above — for vehicles authenticating with a client certificate instead of a
+# username/password. Client cert's CN becomes the MQTT username (no password
+# needed); cafile is the CA that signs vehicle certs. Disabled until vehicle
+# PKI issuance is decided.
+mtls:
+  enabled: false
+  port: 8884
+  caFile: ""
+  certFile: ""
+  keyFile: ""
+
 resources:
   limits:
     cpu: 200m

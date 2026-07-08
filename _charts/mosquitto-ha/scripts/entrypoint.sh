@@ -51,4 +51,8 @@ label_self active
 /scripts/replay-retain.sh &
 /scripts/retain-sync.sh &
 
+if [ "${AUTH_ENABLED:-false}" = "true" ] && [ -n "${AUTH_PASSWORD_FILE:-}" ] && [ -f "$AUTH_PASSWORD_FILE" ]; then
+  mosquitto_passwd -b -c /mosquitto/auth/passwordfile "${AUTH_USERNAME:-explorer}" "$(cat "$AUTH_PASSWORD_FILE")"
+fi
+
 exec mosquitto -c /mosquitto/config/mosquitto.conf

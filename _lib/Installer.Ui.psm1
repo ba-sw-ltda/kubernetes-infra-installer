@@ -927,6 +927,7 @@ Export-ModuleMember -Function @(
   'Remove-CsiSecretMount'
   'Protect-ComponentIngress'
   'Register-PortalEntry'
+  'Get-PortalIconDataUri'
   'Unregister-PortalEntry'
   'Merge-Config'
   'Get-ComponentConfig'

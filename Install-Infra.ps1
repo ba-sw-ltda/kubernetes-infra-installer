@@ -46,6 +46,55 @@ function Get-ComponentNamespace {
     throw "Get-ComponentNamespace: no namespace group known for component '$FolderName'"
 }
 
+function Get-PreinstalledDependencies {
+    <#
+    .SYNOPSIS
+        Checks the live cluster for the two shared dependencies other components
+        force-select (the "mqtt-broker" RadioGroup and standalone "20-redis") so Step 4
+        doesn't lock a reinstall just because MQTT Explorer / Redis Insight is picked.
+        Mirrors Baseline's Get-PreinstalledGroups (helm-status/exit-code check run inside
+        Invoke-ScriptBlockWithSpinner), scoped to these two known dependencies instead of
+        a generic per-group scan.
+    .OUTPUTS
+        HashSet[string] using the exact tokens RequiresComponents/RequiresGroups already
+        produce below ("__group_mqtt-broker__", "20-redis") so callers can subtract it
+        directly from a component's Requires array.
+    #>
+    $checks = [ordered]@{
+        "__group_mqtt-broker__" = @{ Release = "mqtt-broker"; Namespace = "mqtt" }
+        "20-redis"              = @{ Release = "redis"; Namespace = "redis" }
+    }
+    $installed = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($token in $checks.Keys) {
+        $release = $checks[$token].Release
+        $namespace = $checks[$token].Namespace
+        $result = Invoke-ScriptBlockWithSpinner -Message "Checking for existing $release..." -ScriptBlock {
+            param($path, $kubeconfig, $release, $namespace)
+            $env:PATH = $path
+            if ($kubeconfig) { $env:KUBECONFIG = $kubeconfig }
+            $output = & helm status $release --namespace $namespace 2>&1 | Out-String
+            [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+        } -ArgumentList @($env:PATH, $env:KUBECONFIG, $release, $namespace) | Select-Object -Last 1
+        $found = $result.ExitCode -eq 0
+        if ($found) { [void]$installed.Add($token) }
+        $mark = if ($found) { "✓" } else { "✗" }
+        $color = if ($found) { "Green" } else { "Yellow" }
+        Write-Host "  $mark $release (namespace: $namespace) - $(if ($found) { 'already installed' } else { 'not found' })" -ForegroundColor $color
+        if (-not $found -and $result.Output -notmatch 'release:\s*not found') {
+            # A non-zero exit here should normally just mean "not installed" (helm's
+            # "release: not found"). Anything else (auth/context/TLS/connectivity
+            # errors) would otherwise be silently swallowed and misreported as
+            # "not installed" — surface it so a real cluster problem isn't hidden.
+            Write-Host "    unexpected helm output (treated as not installed):" -ForegroundColor DarkYellow
+            Write-Host "    $($result.Output.Trim())" -ForegroundColor DarkYellow
+        }
+    }
+    # Comma operator prevents PowerShell from enumerating the HashSet onto the
+    # pipeline — without it, an empty HashSet unrolls to zero objects and the
+    # caller's assignment becomes $null instead of an empty collection.
+    return ,$installed
+}
+
 function Connect-ExistingAksCluster {
     $stepTitle = "Step 2: Connecting to Cluster — Azure AKS"
     $stateFile = Join-Path $PSScriptRoot ".aks-state.json"
@@ -497,67 +546,44 @@ function Start-InfraInstallation {
         exit 1
     }
     Write-Host "  ✓ Kubernetes $serverVersion" -ForegroundColor Green
+
+    $preinstalledDependencies = Get-PreinstalledDependencies
+    $dependencyLabels = @{
+        "__group_mqtt-broker__" = "MQTT broker"
+        "20-redis"              = "Redis"
+    }
+    if ($preinstalledDependencies.Count -gt 0) {
+        $labels = @($preinstalledDependencies | ForEach-Object { $dependencyLabels[$_] })
+        Write-Host "  ✓ Already installed, will be unlocked in the next step: $($labels -join ', ')" -ForegroundColor Green
+    }
+
     Write-Host "`nConnected to $platform." -ForegroundColor Green
     Start-Sleep -Seconds 1
     Write-Host "Press any key to continue..." -ForegroundColor DarkGray
     [Console]::ReadKey($true) | Out-Null
 
     Write-Section -Title "Step 3: Checking Cluster Prerequisites — $platform" `
-        -Hint "Creates the mqtt/redis namespaces (Rancher project 'Shared Infrastructure') and checks ingress, cert-manager, secrets backend, and storage class against the live cluster" `
+        -Hint "Checks ingress, cert-manager, secrets backend, and storage class against the live cluster" `
         -Current $uiContext
     Write-Host ""
     Write-Host "Checking prerequisites" -ForegroundColor Cyan
     Write-Host ""
-    # Every infra component installs into one of a small set of fixed,
-    # cluster-wide namespaces here, grouped by function (mqtt/redis) rather
-    # than one shared "shared-infra" namespace — unlike the per-tenant Navios
-    # App-Installer which creates one navios-<kuerzel> namespace per Anlage
-    # instance. No prompt, no state file. Get-ComponentNamespace (below) maps
-    # each component folder to its group; both namespaces are ensured (and
-    # assigned to the Rancher project "Shared Infrastructure") right
-    # alongside the other prerequisites — a one-time, once-per-cluster setup
-    # step, not substantial enough to warrant its own page.
-    $namespaces = @("mqtt", "redis")
+    # Namespace creation and Rancher project assignment are no longer done
+    # centrally here — each component's own Install.ps1 ensures its namespace
+    # (idempotent kubectl create --dry-run|apply) and calls
+    # Set-RancherProjectAssignment right after, using the RancherProject key
+    # from its own Config.psd1, before its first kubectl call against that
+    # namespace. This is safe even when multiple components share a
+    # namespace (mqtt, redis — see Get-ComponentNamespace above): every
+    # sibling in a group carries the same RancherProject value, and repeated
+    # namespace creation/assignment across siblings is a no-op.
 
-    # Invoke-ScriptBlockWithSpinner's background job has no access to this
-    # session's env vars, so PATH/KUBECONFIG must be forwarded explicitly
-    # (Invoke-WithSpinner does this automatically; this one doesn't) — same
-    # pattern as Kubernetes.DSA's namespace-creation step. Project lookup/
-    # create-and-assign itself is shared (powershell-cluster-bootstrap's
-    # Set-RancherProjectAssignment) rather than duplicated inline here.
-    foreach ($namespace in $namespaces) {
-        $namespaceExists = Invoke-ScriptBlockWithSpinner -Message "Checking namespace '$namespace'..." -ScriptBlock {
-            param($path, $kubeconfig, $ns)
-            $env:PATH = $path
-            if ($kubeconfig) { $env:KUBECONFIG = $kubeconfig }
-            & kubectl get namespace $ns 2>$null | Out-Null
-            $LASTEXITCODE -eq 0
-        } -ArgumentList @($env:PATH, $env:KUBECONFIG, $namespace)
-
-        if ($namespaceExists) {
-            Write-Host "  ✓ namespace '$namespace'" -ForegroundColor Green
-        } else {
-            $nsResult = Invoke-ScriptBlockWithSpinner -Message "Creating namespace '$namespace'..." -ScriptBlock {
-                param($path, $kubeconfig, $ns)
-                $env:PATH = $path
-                if ($kubeconfig) { $env:KUBECONFIG = $kubeconfig }
-                $out = & kubectl create namespace $ns --dry-run=client -o yaml 2>&1 | & kubectl apply -f - 2>&1
-                [PSCustomObject]@{ Output = $out; ExitCode = $LASTEXITCODE }
-            } -ArgumentList @($env:PATH, $env:KUBECONFIG, $namespace)
-            if ($nsResult.ExitCode -ne 0) { Write-Error "Failed to create namespace '$namespace': $($nsResult.Output)"; exit 1 }
-            Write-Host "  ✓ namespace '$namespace' (created)" -ForegroundColor Green
-        }
-
-        Set-RancherProjectAssignment -Namespace $namespace -ProjectName "Shared Infrastructure"
-    }
-    $uiContext.Namespace = ($namespaces -join " / ")
-
-    # Each remaining prereq is checked and reported individually — its own
-    # spinner, then its own immediate ✓/✗ result — same pattern as the
-    # namespace check above, rather than batching everything into one
-    # spinner and only revealing results once everything has finished.
-    # PrerequisiteChecks.psm1 has to be re-imported inside each ScriptBlock,
-    # same env-forwarding pattern as above.
+    # Each prereq is checked and reported individually — its own spinner,
+    # then its own immediate ✓/✗ result — rather than batching everything
+    # into one spinner and only revealing results once everything has
+    # finished. PrerequisiteChecks.psm1 has to be re-imported inside each
+    # ScriptBlock: Invoke-ScriptBlockWithSpinner's background job has no
+    # access to this session's already-imported modules or env vars.
     $modulePath = "$PSScriptRoot/_lib/PrerequisiteChecks.psm1"
     $prereqChecks = [ordered]@{
         "ingress"         = "Test-IngressPresent"
@@ -609,7 +635,12 @@ function Start-InfraInstallation {
             RadioGroupLabel    = $config.RadioGroupLabel
             RadioDefault       = [bool]$config.RadioDefault
             DefaultSelected    = if ($config.Keys -contains 'DefaultSelected') { [bool]$config.DefaultSelected } else { $true }
-            RequiresComponents = @($config.RequiresComponents) + @($config.RequiresGroups | ForEach-Object { "__group_$_`__" })
+            # @($config.RequiresComponents) is @($null) -> a one-element [$null]
+            # array, not @(), when the key is absent from Config.psd1 (e.g.
+            # 20-redis has neither RequiresComponents nor RequiresGroups) — strip
+            # that stray $null before it reaches every consumer of this property.
+            RequiresComponents = @(@($config.RequiresComponents) + @($config.RequiresGroups | ForEach-Object { "__group_$_`__" }) |
+                Where-Object { $_ -and $_ -notin $preinstalledDependencies })
         }
     }
 
@@ -636,10 +667,20 @@ function Start-InfraInstallation {
         $groupLabel = ($available | Where-Object { $_.RadioGroupLabel } | Select-Object -First 1 -ExpandProperty RadioGroupLabel)
         if (-not $groupLabel) { $groupLabel = $group.Name }
 
+        $groupToken = "__group_$($group.Name)__"
+        # Already installed on the connected cluster (per $preinstalledDependencies
+        # above) -> don't preselect a reinstall, but leave it toggleable (its
+        # RequiresComponents was already stripped of $preinstalledDependencies above,
+        # so nothing force-locks it back on either).
+        $groupAlreadyInstalled = $preinstalledDependencies.Contains($groupToken)
+        if ($groupAlreadyInstalled) { $groupLabel = "$groupLabel (already installed)" }
+
         $children = @($available | ForEach-Object {
-            @{ Label = $_.DisplayName; Value = $_.FolderName; Type = "radio"; RadioGroup = $group.Name; Default = $_.RadioDefault; Requires = $_.RequiresComponents }
+            @{ Label = $_.DisplayName; Value = $_.FolderName; Type = "radio"; RadioGroup = $group.Name
+               Default = if ($groupAlreadyInstalled) { $false } else { $_.RadioDefault }
+               Requires = $_.RequiresComponents }
         })
-        $sectionItems.Add(@{ Label = $groupLabel; Value = "__group_$($group.Name)__"; Type = "group"; Default = $true; Children = $children }) | Out-Null
+        $sectionItems.Add(@{ Label = $groupLabel; Value = $groupToken; Type = "group"; Default = -not $groupAlreadyInstalled; Children = $children }) | Out-Null
     }
 
     foreach ($c in $standalone) {
@@ -647,7 +688,10 @@ function Start-InfraInstallation {
             Write-Host "  ⚠ $($c.DisplayName) not available (missing: $($c.MissingPrereqs -join ', '))" -ForegroundColor Yellow
             continue
         }
-        $sectionItems.Add(@{ Label = $c.DisplayName; Value = $c.FolderName; Type = "check"; Default = $c.DefaultSelected; Requires = $c.RequiresComponents }) | Out-Null
+        $alreadyInstalled = $preinstalledDependencies.Contains($c.FolderName)
+        $label = if ($alreadyInstalled) { "$($c.DisplayName) (already installed)" } else { $c.DisplayName }
+        $default = if ($alreadyInstalled) { $false } else { $c.DefaultSelected }
+        $sectionItems.Add(@{ Label = $label; Value = $c.FolderName; Type = "check"; Default = $default; Requires = $c.RequiresComponents }) | Out-Null
     }
 
     if ($sectionItems.Count -eq 0) {
@@ -695,15 +739,29 @@ function Start-InfraInstallation {
     }
 
     # Install dependencies before dependents (e.g. Redis before Mosquitto-HA,
-    # which RequiresComponents it) — numeric folder order alone doesn't
-    # guarantee this, a dependency isn't necessarily lower-numbered.
+    # which RequiresComponents it; the RadioGroup winner before MQTT Explorer,
+    # which RequiresGroups it) — numeric folder order alone doesn't guarantee
+    # this, a dependency isn't necessarily lower-numbered.
+    # RequiresComponents (built above) encodes a RequiresGroups dependency as
+    # the opaque "__group_<name>__" token used to lock the selection screen —
+    # that token never equals a FolderName, so it has to be resolved back to
+    # the FolderName of whichever selected component actually owns that
+    # RadioGroup before it means anything to a FolderName-based sort.
+    $groupOwner = @{}
+    foreach ($sc in $selectedComponents) {
+        if ($sc.RadioGroup) { $groupOwner["__group_$($sc.RadioGroup)__"] = $sc.FolderName }
+    }
     $remaining = [System.Collections.Generic.List[object]]::new()
     $remaining.AddRange([object[]]$selectedComponents)
     $ordered = [System.Collections.Generic.List[object]]::new()
     while ($remaining.Count -gt 0) {
         $remainingNames = @($remaining | ForEach-Object { $_.FolderName })
         $next = $remaining | Where-Object {
-            $deps = @($_.RequiresComponents)
+            # RequiresComponents can carry a stray $null (an artifact of @($null)
+            # when a component defines neither RequiresComponents nor
+            # RequiresGroups) — filter it before the lookup, since
+            # Dictionary.ContainsKey(null) throws instead of just returning false.
+            $deps = @($_.RequiresComponents | Where-Object { $_ } | ForEach-Object { if ($groupOwner.ContainsKey($_)) { $groupOwner[$_] } else { $_ } })
             @($deps | Where-Object { $remainingNames -contains $_ }).Count -eq 0
         } | Select-Object -First 1
         if (-not $next) { $next = $remaining[0] }   # dependency cycle guard, shouldn't happen
@@ -724,21 +782,10 @@ function Start-InfraInstallation {
             Write-Warning "  ⚠ Install script not found: $($c.InstallScript)"
             continue
         }
-        # If this component belongs to a RadioGroup, uninstall any previously-
-        # installed sibling first. Each sibling's Uninstall.ps1 has a chart
-        # identity guard that makes it a safe no-op when a different chart (or
-        # nothing) is under that release name, so this is unconditionally safe.
+        # RadioGroup sibling swap (e.g. EMQX <-> Mosquitto) is handled inside
+        # each component's own Install.ps1 now — it can check silently and
+        # only surface a spinner when an uninstall is actually needed.
         $componentNamespace = Get-ComponentNamespace -FolderName $c.FolderName
-        if ($c.RadioGroup) {
-            $siblings = @($components | Where-Object { $_.RadioGroup -eq $c.RadioGroup -and $_.FolderName -ne $c.FolderName })
-            foreach ($sibling in $siblings) {
-                $siblingUninstall = Join-Path (Split-Path $sibling.ConfigPath -Parent) "Uninstall.ps1"
-                if (Test-Path $siblingUninstall) {
-                    Write-Host "  Checking if $($sibling.DisplayName) needs to be removed first..." -ForegroundColor Gray
-                    & $siblingUninstall -Platform $platform -Namespace (Get-ComponentNamespace -FolderName $sibling.FolderName)
-                }
-            }
-        }
 
         $promptArgs = if ($componentInputs.ContainsKey($c.FolderName)) { $componentInputs[$c.FolderName] } else { @{} }
         & $c.InstallScript -Platform $platform -Namespace $componentNamespace @extraArgs @promptArgs

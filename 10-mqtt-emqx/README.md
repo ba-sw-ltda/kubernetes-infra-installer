@@ -17,6 +17,19 @@ custom active/passive/passive design there. Mutually exclusive with
 - No persistence-design caveats like Mosquitto HA's retained-message-only sync
   — this is a real production-grade clustering implementation, not something
   bolted on for this installer.
+- An official, config-only dynamic authorization backend
+  (`authorization.sources` type `redis`) — ACLs can be looked up per-client at
+  connect/subscribe time instead of provisioned statically. Mosquitto has no
+  equivalent (see `10-mqtt-mosquitto`'s "Accepted limitations"). **This is why
+  a future multi-plant deployment (several physical "Anlagen" behind one
+  shared/central broker, each vehicle restricted to only the topics of the
+  plant it's currently at) must run on EMQX, not Mosquitto** — that scheme
+  needs per-vehicle ACLs resolved dynamically against an external store (e.g.
+  Redis, already deployed via `20-redis`), not a hand-maintained ACL file.
+  Not wired up yet — currently only the file-based authorizer is configured
+  (see the ACL ConfigMap in `Install.ps1`, added to fix `$SYS` topic
+  visibility); the Redis source would be a new `EMQX_AUTHORIZATION__SOURCES__`
+  entry added ahead of it.
 
 ## Quick reference
 

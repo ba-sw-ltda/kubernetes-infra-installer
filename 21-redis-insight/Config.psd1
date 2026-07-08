@@ -1,10 +1,13 @@
 @{
     Name             = "redis-insight"
     DisplayName      = "Redis Insight (Web UI)"
-    Namespace        = "shared-infra"
-    DefaultSelected  = $false
+    RancherProject   = "Shared Infrastructure"
     RequiredPrereqs  = @("ingress", "secrets-backend", "storage")
     RequiresComponents = @("20-redis")
+
+    PortalTitle     = "Redis Insight"
+    PortalSubtitle  = "Web UI for Redis"
+    PortalIcon      = "logo.svg"
 
     UserConfig = @{
         Image        = "redis/redisinsight"

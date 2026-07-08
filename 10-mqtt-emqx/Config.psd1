@@ -5,7 +5,7 @@
     Repository  = "https://repos.emqx.io/charts"
     ChartName   = "emqx"
     Version     = "5.8.9"
-    Namespace   = "shared-infra"
+    RancherProject  = "Shared Infrastructure"
     RadioGroup      = "mqtt-broker"   # mutually exclusive with 10-mqtt-mosquitto
     RadioGroupLabel = "MQTT-Broker"
     RadioDefault    = $false

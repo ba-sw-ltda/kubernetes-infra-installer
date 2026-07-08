@@ -50,6 +50,13 @@ Write-Host "  Hostname:   $Hostname" -ForegroundColor Gray
 Write-Host "  Redis:      ${redisHost}:${redisPort}" -ForegroundColor Gray
 Write-Host ""
 
+# Namespace (idempotent — safe even when shared with sibling components)
+& kubectl create namespace $Namespace --dry-run=client -o yaml 2>&1 | & kubectl apply -f - 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create namespace '$Namespace'"; exit 1 }
+Write-Host "  ✓ Namespace ready" -ForegroundColor Green
+
+Set-RancherProjectAssignment -Namespace $Namespace -ProjectName $FullConfig.RancherProject
+
 # ── 1. CSI: mount the 'default' user password from Vault ─────────────────────
 # Uses the same Vault path as the Redis installer wrote to — Redis Insight
 # only needs read access to the 'default' key, so its policy is scoped to
@@ -335,8 +342,10 @@ else { Write-Warning "  Could not apply Ingress — check cluster ingress contro
 
 # ── 6. Portal entry ───────────────────────────────────────────────────────────
 $scheme = if ($issuerName) { "https" } else { "http" }
-Register-PortalEntry -Name "Redis Insight" -Url "${scheme}://$Hostname" `
-    -Category "Data" -Subtitle "Redis browser & monitoring" -Order 21
+$portalIcon = Get-PortalIconDataUri -ScriptRoot $ScriptRoot -IconFile $FullConfig.PortalIcon
+Register-PortalEntry -Name $FullConfig.PortalTitle -Url "${scheme}://$Hostname" `
+    -Category "Data" -Subtitle $FullConfig.PortalSubtitle -Order 21 `
+    -LogoUrl $portalIcon
 
 if ($verbose) {
     Write-Host ""

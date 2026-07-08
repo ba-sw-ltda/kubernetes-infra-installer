@@ -13,7 +13,7 @@
 param(
     [string]$Platform,
     [string]$Domain = "",
-    [string]$Namespace = "shared-infra"
+    [Parameter(Mandatory)][string]$Namespace
 )
 
 $BaseDir = Split-Path $PSScriptRoot -Parent

@@ -54,4 +54,13 @@ if (Remove-ClusterSecret -Path $vaultPath -Platform $Platform -BaseDir $BaseDir)
     Write-Warning "  ⚠ Could not remove Vault credentials at '$vaultPath'"
 }
 
+# Rancher project assignment: only unlink once nothing else is running in
+# this (possibly shared) namespace — checked live against the cluster so
+# this is correct however this script is invoked (standalone, as a
+# dependent, or alongside/without sibling components in the same run).
+$remainingWorkloads = & kubectl get deployments,statefulsets,daemonsets -n $Namespace --no-headers 2>$null
+if (-not $remainingWorkloads) {
+    Remove-RancherProjectAssignment -Namespace $Namespace -ProjectName $Config.RancherProject
+}
+
 exit 0

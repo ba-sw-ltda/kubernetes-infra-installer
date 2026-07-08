@@ -4,12 +4,11 @@
     DisplayName = "Redis"
     Repository  = "oci://registry-1.docker.io/bitnamicharts/redis"
     Version     = "27.0.12"
-    Namespace   = "shared-infra"
+    RancherProject = "Shared Infrastructure"
 
     # Gates this component on the ClusterSecretStore 'cluster-secrets' being
     # Ready (Test-SecretsBackendPresent) — needed because ACL credentials are
     # provisioned through Vault/CSI, not a chart-managed password anymore.
-    DefaultSelected = $false
     RequiredPrereqs = @("secrets-backend")
 
     # Redis ACL users provisioned alongside the "default" superuser — one

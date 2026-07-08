@@ -62,10 +62,48 @@ $RedisPort      = "6379"
 $redisAclUser   = "mosquitto"
 $vaultPath      = "$RedisNamespace/redis-acl-users"
 
+# MQTT client authentication (username/password) — same "no k8s Secret ever"
+# pattern, own Vault path since it's unrelated to the Redis backplane above.
+# Shared across both broker siblings (Mosquitto/EMQX both take "$Namespace"),
+# so switching brokers reuses the same generated credential instead of
+# minting a new one.
+$mqttAuthVaultPath = "$Namespace/mqtt-client-auth"
+$mqttAuthUser      = "explorer"
+
 Write-Host "  Namespace:  $Namespace" -ForegroundColor Gray
 Write-Host "  Redis:      ${RedisHost}:${RedisPort}" -ForegroundColor Gray
 Write-Host "  Exposure:   $(if ($ExternalExposure) { 'LoadBalancer' } else { 'ClusterIP' })" -ForegroundColor Gray
 Write-Host ""
+
+# Namespace (idempotent — safe even when shared with sibling components).
+# Must happen before the CSI SecretProviderClass applies below (they target
+# $Namespace), which is why this runs ahead of the Docker build/push section.
+& kubectl create namespace $Namespace --dry-run=client -o yaml 2>&1 | & kubectl apply -f - 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create namespace '$Namespace'"; exit 1 }
+Write-Host "  ✓ Namespace ready" -ForegroundColor Green
+
+Set-RancherProjectAssignment -Namespace $Namespace -ProjectName $FullConfig.RancherProject
+
+# ── RadioGroup sibling swap: EMQX and Mosquitto share the Helm release name
+# "$($FullConfig.Name)" (one chart can occupy it at a time), so switching
+# brokers means the previous one must be fully uninstalled first. Checked
+# silently — only surfaces output if a swap is actually needed.
+$siblingExpectedChart = "emqx"
+$releaseJson    = & helm get metadata $FullConfig.Name --namespace $Namespace --output json 2>$null
+$releaseObj     = if ($releaseJson) { try { $releaseJson | ConvertFrom-Json } catch { $null } } else { $null }
+$installedChart = if ($releaseObj) { $releaseObj.chart } else { $null }
+if ($installedChart -eq $siblingExpectedChart) {
+    $siblingUninstall = Join-Path $BaseDir "10-mqtt-emqx\Uninstall.ps1"
+    $exitCode = Invoke-ScriptBlockWithSpinner -Message "Removing previous MQTT broker (EMQX)..." -ScriptBlock {
+        param($path, $kubeconfig, $script, $platform, $namespace)
+        $env:PATH = $path
+        if ($kubeconfig) { $env:KUBECONFIG = $kubeconfig }
+        & $script -Platform $platform -Namespace $namespace *>&1 | Out-Null
+        [PSCustomObject]@{ ExitCode = $LASTEXITCODE }
+    } -ArgumentList @($env:PATH, $env:KUBECONFIG, $siblingUninstall, $Platform, $Namespace) | Select-Object -Last 1 -ExpandProperty ExitCode
+    if ($exitCode -ne 0) { Write-Error "Failed to remove previous MQTT broker (EMQX)"; exit 1 }
+    Write-Host "  ✓ Previous MQTT broker (EMQX) removed" -ForegroundColor Green
+}
 
 & kubectl get svc "$redisName-master" -n $RedisNamespace 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Error "Redis Service '$redisName-master' nicht gefunden in Namespace '$RedisNamespace' — wurde 20-redis installiert?"; exit 1 }
@@ -84,6 +122,29 @@ $csi.SpcYaml | & kubectl apply -f - 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Error "Failed to apply SecretProviderClass '$($csi.SpcName)'"; exit 1 }
 Write-Host "  ✓ SecretProviderClass '$($csi.SpcName)' applied" -ForegroundColor Green
 
+# ── MQTT client authentication (username/password) — generated once and reused
+# on every subsequent install/upgrade (guarded by Read-ClusterSecret, same
+# generate-if-missing convention as the Redis ACL / TLS cert provisioning
+# above), never handled as a Kubernetes Secret at any point.
+if (-not (Read-ClusterSecret -Path $mqttAuthVaultPath -Key $mqttAuthUser -Platform $Platform -BaseDir $BaseDir)) {
+    Write-Host "  · Generating MQTT client credential for '$mqttAuthUser'..." -ForegroundColor DarkGray
+    $mqttAuthPassword = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
+    $ok = Write-ClusterSecret -Path $mqttAuthVaultPath -Data @{ $mqttAuthUser = $mqttAuthPassword } -Platform $Platform -BaseDir $BaseDir
+    if (-not $ok) { Write-Error "Failed to store MQTT client credential in Vault"; exit 1 }
+    Write-Host "  ✓ MQTT client credential generated and stored in Vault" -ForegroundColor Green
+} else {
+    Write-Host "  ✓ MQTT client credential for '$mqttAuthUser' already in Vault — reusing" -ForegroundColor Green
+}
+
+$authCsi = New-CsiSecretMount -AppName "mosquitto-mqtt-auth" -VaultPath $mqttAuthVaultPath -Keys @($mqttAuthUser) `
+    -Namespace $Namespace -ServiceAccount $FullConfig.Name -Platform $Platform `
+    -MountPath "/vault/mqtt-auth" -BaseDir $BaseDir
+if (-not $authCsi.Installed) { Write-Error "Secrets backend not available for CSI mount"; exit 1 }
+
+$authCsi.SpcYaml | & kubectl apply -f - 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Error "Failed to apply SecretProviderClass '$($authCsi.SpcName)'"; exit 1 }
+Write-Host "  ✓ SecretProviderClass '$($authCsi.SpcName)' applied" -ForegroundColor Green
+
 # ── Server-side TLS (port 8883) via OpenBao's PKI engine, only where it's ──
 # available (RKE2/Kind — see Get-ClusterIssuerName). Server-side only, not
 # mTLS — same scope boundary as Kubernetes.BaseLine's own CERTIFICATES.md
@@ -93,7 +154,7 @@ $mqttHostname = if ($Domain) { "mqtt.$Domain" } else { "" }
 if ($mqttHostname -and (Get-ClusterIssuerName -Platform $Platform)) {
     $tlsVaultPath = "$Namespace/mosquitto-tls"
     if (-not (Read-ClusterSecret -Path $tlsVaultPath -Key "certificate" -Platform $Platform -BaseDir $BaseDir)) {
-        Write-Host "  Issuing TLS certificate for '$mqttHostname' from OpenBao PKI..." -ForegroundColor Gray
+        Write-Host "  · Issuing TLS certificate for '$mqttHostname' from OpenBao PKI..." -ForegroundColor DarkGray
         $cert = New-PkiServerCert -CommonName $mqttHostname -Platform $Platform -BaseDir $BaseDir
         if ($cert) {
             $ok = Write-ClusterSecret -Path $tlsVaultPath -Data $cert -Platform $Platform -BaseDir $BaseDir
@@ -118,15 +179,18 @@ if ($mqttHostname -and (Get-ClusterIssuerName -Platform $Platform)) {
     }
 }
 
-# Built manually rather than splatting $csi.HelmArgs/$tlsCsi.HelmArgs verbatim
-# — New-CsiSecretMount's returned HelmArgs always target index [0]
+# Built manually rather than splatting $csi.HelmArgs/$tlsCsi.HelmArgs/$authCsi.HelmArgs
+# verbatim — New-CsiSecretMount's returned HelmArgs always target index [0]
 # (extraVolumes[0]/extraVolumeMounts[0]), assuming a chart mounts exactly one
-# CSI secret. With two (Redis password + TLS cert), the second --set would
-# silently overwrite the first at the same index instead of adding to it.
+# CSI secret. With three (Redis password + MQTT auth + TLS cert), the later
+# --sets would silently overwrite the first at the same index instead of
+# adding to it.
 $extraVolumes = [System.Collections.Generic.List[hashtable]]::new()
 $extraVolumeMounts = [System.Collections.Generic.List[hashtable]]::new()
 $extraVolumes.Add(@{ name = "vault-secrets"; csi = @{ driver = "secrets-store.csi.k8s.io"; readOnly = $true; volumeAttributes = @{ secretProviderClass = $csi.SpcName } } }) | Out-Null
 $extraVolumeMounts.Add(@{ name = "vault-secrets"; mountPath = $csi.MountPath; readOnly = $true }) | Out-Null
+$extraVolumes.Add(@{ name = "vault-mqtt-auth"; csi = @{ driver = "secrets-store.csi.k8s.io"; readOnly = $true; volumeAttributes = @{ secretProviderClass = $authCsi.SpcName } } }) | Out-Null
+$extraVolumeMounts.Add(@{ name = "vault-mqtt-auth"; mountPath = $authCsi.MountPath; readOnly = $true }) | Out-Null
 if ($tlsCsi) {
     $extraVolumes.Add(@{ name = "vault-tls"; csi = @{ driver = "secrets-store.csi.k8s.io"; readOnly = $true; volumeAttributes = @{ secretProviderClass = $tlsCsi.SpcName } } }) | Out-Null
     $extraVolumeMounts.Add(@{ name = "vault-tls"; mountPath = $tlsCsi.MountPath; readOnly = $true }) | Out-Null
@@ -213,6 +277,9 @@ $HelmArgs = @(
     "--set", "redis.port=$RedisPort",
     "--set", "redis.username=$redisAclUser",
     "--set", "redis.passwordFile=$($csi.MountPath)/$redisAclUser",
+    "--set", "auth.enabled=true",
+    "--set", "auth.username=$mqttAuthUser",
+    "--set", "auth.passwordFile=$($authCsi.MountPath)/$mqttAuthUser",
     "--set", "service.type=$(if ($ExternalExposure) { 'LoadBalancer' } else { 'ClusterIP' })",
     "--set", "resources.limits.cpu=$($UserConfig.Resources.Limits.Cpu)",
     "--set", "resources.limits.memory=$($UserConfig.Resources.Limits.Memory)",
@@ -273,6 +340,8 @@ Write-Host "  ──────────────────────
 Write-Host "  Quick Reference" -ForegroundColor White
 Write-Host "  ──────────────────────────────────────────" -ForegroundColor DarkGray
 Write-Host "  Host (cluster-internal):  $($FullConfig.Name).$Namespace.svc.cluster.local:1883" -ForegroundColor Yellow
+Write-Host "  Username:                 $mqttAuthUser" -ForegroundColor Yellow
+Write-Host "  Password:                 bao kv get -mount=secret $mqttAuthVaultPath" -ForegroundColor Yellow
 if ($tlsCsi) {
     Write-Host "  TLS (cluster-internal):   $($FullConfig.Name).$Namespace.svc.cluster.local:8883  ($mqttHostname)" -ForegroundColor Yellow
 }

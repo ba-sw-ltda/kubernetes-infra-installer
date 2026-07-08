@@ -40,3 +40,8 @@ spec:
       port: {{ .Values.tls.port }}
       targetPort: mqtts
     {{- end }}
+    {{- if .Values.mtls.enabled }}
+    - name: mqtt-mtls
+      port: {{ .Values.mtls.port }}
+      targetPort: mqtt-mtls
+    {{- end }}

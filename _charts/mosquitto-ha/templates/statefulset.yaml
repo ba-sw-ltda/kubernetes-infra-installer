@@ -35,6 +35,10 @@ spec:
             - name: mqtts
               containerPort: {{ .Values.tls.port }}
             {{- end }}
+            {{- if .Values.mtls.enabled }}
+            - name: mqtt-mtls
+              containerPort: {{ .Values.mtls.port }}
+            {{- end }}
           env:
             - name: REDIS_HOST
               value: {{ .Values.redis.host | quote }}
@@ -52,11 +56,21 @@ spec:
               value: {{ .Values.redis.leaderTtlMs | quote }}
             - name: RETAIN_PREFIX
               value: {{ .Values.redis.retainPrefix | quote }}
+            - name: AUTH_ENABLED
+              value: {{ .Values.auth.enabled | quote }}
+            - name: AUTH_USERNAME
+              value: {{ .Values.auth.username | quote }}
+            - name: AUTH_PASSWORD_FILE
+              value: {{ .Values.auth.passwordFile | quote }}
           volumeMounts:
             - name: scripts
               mountPath: /scripts
             - name: conf
               mountPath: /mosquitto/config
+            {{- if .Values.auth.enabled }}
+            - name: auth
+              mountPath: /mosquitto/auth
+            {{- end }}
             {{- if .Values.extraVolumeMounts }}
             {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
             {{- end }}
@@ -75,6 +89,10 @@ spec:
         - name: conf
           configMap:
             name: {{ .Release.Name }}-conf
+        {{- if .Values.auth.enabled }}
+        - name: auth
+          emptyDir: {}
+        {{- end }}
         {{- if .Values.extraVolumes }}
         {{- toYaml .Values.extraVolumes | nindent 8 }}
         {{- end }}

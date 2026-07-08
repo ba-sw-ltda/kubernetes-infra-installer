@@ -56,6 +56,17 @@ image, so they can be iterated on without a rebuild).
 - No authentication wired up yet (`allow_anonymous true`) — matches this
   installer's current "plain secrets, no CSI" stance everywhere else; not for
   untrusted networks as-is.
+- No dynamic, externally-backed authorization. Vanilla Eclipse Mosquitto only
+  offers a static `acl_file` or its self-contained "Dynamic Security" plugin
+  (own local JSON DB, managed via an MQTT admin API) — there is no official
+  Redis/HTTP-backed ACL. **Decision: if a future deployment needs to run
+  multiple plants ("Anlagen") behind one shared broker with per-vehicle,
+  per-plant topic isolation enforced as a security control (not just
+  convention), use `10-mqtt-emqx` instead** — EMQX ships an official
+  `authorization.sources` Redis backend, so per-vehicle ACLs can be looked up
+  dynamically instead of provisioned by hand. Getting that on Mosquitto would
+  mean building an unofficial third-party auth plugin (e.g. `mosquitto-go-auth`)
+  into the custom image — avoid; switch broker instead.
 
 ## Before installing on RKE2/AKS/EKS/GKE
 

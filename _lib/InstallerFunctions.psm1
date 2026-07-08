@@ -44,4 +44,5 @@ Export-ModuleMember -Function @(
   'Remove-AwsSecretsManagerSecret'
   'Remove-GcpSecretManagerSecret'
   'Test-AutheliaInstalled'
+  'Get-PortalIconDataUri'
 )

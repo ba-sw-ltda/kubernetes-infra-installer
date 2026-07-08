@@ -5,21 +5,57 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   mosquitto.conf: |
-    listener {{ .Values.service.mqttPort }}
+    # Global directives — must precede all `listener` lines. Per-listener
+    # directives (allow_anonymous, password_file, cafile/certfile/keyfile,
+    # require_certificate, use_identity_as_username) only apply to the
+    # nearest preceding `listener` line, so each listener below repeats its
+    # own auth scoping explicitly instead of relying on inheritance.
     # No local persistence by design — Redis is the only durable store (see
     # entrypoint.sh's leader-election + replay-retain.sh); an active pod can be
     # replaced by either passive sibling with no data locality concerns.
     persistence false
-    # v1 has no auth wired up yet (matches the rest of this installer's "plain
-    # secrets/no CSI yet" stance) — anonymous access, not for untrusted networks.
-    allow_anonymous true
     log_dest stdout
+
+    # Listener: plain MQTT — used by in-cluster clients (e.g. MQTT Explorer).
+    listener {{ .Values.service.mqttPort }}
+    {{- if .Values.auth.enabled }}
+    # Username/password required — hash file is generated at container start
+    # by entrypoint.sh from the CSI/Vault-mounted plaintext password, written
+    # to a writable emptyDir (CSI mounts are read-only). See values.yaml's
+    # auth block and 10-mqtt-mosquitto/Install.ps1.
+    allow_anonymous false
+    password_file /mosquitto/auth/passwordfile
+    {{- else }}
+    allow_anonymous true
+    {{- end }}
     {{- if .Values.tls.enabled }}
-    # Server-side TLS only — encrypts the connection, clients still connect
-    # without a client certificate (no mTLS). Cert comes from OpenBao's PKI
-    # engine, see 10-mqtt-mosquitto/Install.ps1.
+
+    # Listener: server-side TLS — encrypts the connection, clients still
+    # authenticate via username/password same as the plain listener above (no
+    # client cert here). Cert comes from OpenBao's PKI engine, see
+    # 10-mqtt-mosquitto/Install.ps1.
     listener {{ .Values.tls.port }}
     cafile {{ .Values.tls.caFile }}
     certfile {{ .Values.tls.certFile }}
     keyfile {{ .Values.tls.keyFile }}
+    {{- if .Values.auth.enabled }}
+    allow_anonymous false
+    password_file /mosquitto/auth/passwordfile
+    {{- else }}
+    allow_anonymous true
+    {{- end }}
+    {{- end }}
+    {{- if .Values.mtls.enabled }}
+
+    # Listener: mutual TLS for vehicles — client certificate required, its CN
+    # becomes the MQTT username, no password_file involved. Kept on its own
+    # port so vehicle auth (mTLS) and Explorer auth (username/password) can
+    # evolve independently.
+    listener {{ .Values.mtls.port }}
+    cafile {{ .Values.mtls.caFile }}
+    certfile {{ .Values.mtls.certFile }}
+    keyfile {{ .Values.mtls.keyFile }}
+    require_certificate true
+    use_identity_as_username true
+    allow_anonymous false
     {{- end }}

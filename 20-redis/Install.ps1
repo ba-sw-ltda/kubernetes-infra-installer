@@ -44,6 +44,13 @@ Write-Host "  Namespace:    $Namespace" -ForegroundColor Gray
 Write-Host "  Architecture: $($UserConfig.Architecture)" -ForegroundColor Gray
 Write-Host ""
 
+# Namespace (idempotent — safe even when shared with sibling components)
+& kubectl create namespace $Namespace --dry-run=client -o yaml 2>&1 | & kubectl apply -f - 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create namespace '$Namespace'"; exit 1 }
+Write-Host "  ✓ Namespace ready" -ForegroundColor Green
+
+Set-RancherProjectAssignment -Namespace $Namespace -ProjectName $FullConfig.RancherProject
+
 # ── 1. Vault-backed credentials: "default" superuser + every AclUsers entry ──
 # Generate-once-and-reuse: re-running this script must not rotate a password
 # that's already in use (Redis would reload it via --aclfile, but every
@@ -65,7 +72,7 @@ foreach ($user in $usernames) {
 }
 
 if ($generated.Count -gt 0) {
-    Write-Host "  Generating Redis ACL credentials for: $($generated -join ', ')" -ForegroundColor Gray
+    Write-Host "  · Generating Redis ACL credentials for: $($generated -join ', ')" -ForegroundColor DarkGray
     $ok = Write-ClusterSecret -Path $vaultPath -Data $passwords -Platform $Platform -BaseDir $BaseDir
     if (-not $ok) { Write-Error "Failed to write Redis ACL credentials to Vault at '$vaultPath'"; exit 1 }
     Write-Host "  ✓ Stored in Vault at '$vaultPath'" -ForegroundColor Green

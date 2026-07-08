@@ -59,4 +59,13 @@ Remove-ClusterSecret -Path "$Namespace/emqx-tls" -Platform $Platform -BaseDir $B
 # replica count.
 & kubectl delete pvc -n $Namespace -l "app.kubernetes.io/instance=$($Config.Name)" --ignore-not-found 2>&1 | Out-Null
 
+# Rancher project assignment: only unlink once nothing else is running in
+# this (possibly shared) namespace — checked live against the cluster so
+# this is correct however this script is invoked (standalone, as a
+# dependent, or alongside/without sibling components in the same run).
+$remainingWorkloads = & kubectl get deployments,statefulsets,daemonsets -n $Namespace --no-headers 2>$null
+if (-not $remainingWorkloads) {
+    Remove-RancherProjectAssignment -Namespace $Namespace -ProjectName $Config.RancherProject
+}
+
 exit 0

@@ -41,25 +41,60 @@ $Name       = $FullConfig.Name
 $BrokerHost = "mqtt-broker.$Namespace.svc.cluster.local"
 $BrokerPort = "1883"
 
+# Same "no k8s Secret ever" credential as the broker's own Explorer auth (see
+# 10-mqtt-mosquitto/Install.ps1 and 10-mqtt-emqx/Install.ps1) — this component
+# only consumes it (never generates), since whichever broker is installed is
+# responsible for generating/storing it first.
+$mqttAuthVaultPath = "$Namespace/mqtt-client-auth"
+$mqttAuthUser      = "explorer"
+
 Write-Host "  Image:      $($FullConfig.Image):$($FullConfig.Version)" -ForegroundColor Gray
 Write-Host "  Namespace:  $Namespace" -ForegroundColor Gray
 Write-Host "  Broker:     ${BrokerHost}:${BrokerPort}" -ForegroundColor Gray
 Write-Host ""
 
-# ── 1. Init-script ConfigMap ──────────────────────────────────────────────────
+# Namespace (idempotent — safe even when shared with sibling components)
+& kubectl create namespace $Namespace --dry-run=client -o yaml 2>&1 | & kubectl apply -f - 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create namespace '$Namespace'"; exit 1 }
+Write-Host "  ✓ Namespace ready" -ForegroundColor Green
+
+Set-RancherProjectAssignment -Namespace $Namespace -ProjectName $FullConfig.RancherProject
+
+# ── 1. MQTT client credential (CSI mount) ─────────────────────────────────────
+# Read-only consumer of the credential the broker already generated/stored —
+# error out clearly rather than silently pre-seeding an unauthenticated
+# connection if a broker hasn't been installed yet.
+if (-not (Read-ClusterSecret -Path $mqttAuthVaultPath -Key $mqttAuthUser -Platform $Platform -BaseDir $BaseDir)) {
+    Write-Error "MQTT client credential '$mqttAuthUser' nicht in Vault gefunden ('$mqttAuthVaultPath') — wurde 10-mqtt-mosquitto oder 10-mqtt-emqx installiert?"
+    exit 1
+}
+
+$authCsi = New-CsiSecretMount -AppName $Name -VaultPath $mqttAuthVaultPath -Keys @($mqttAuthUser) `
+    -Namespace $Namespace -ServiceAccount $Name -Platform $Platform `
+    -MountPath "/vault/mqtt-auth" -BaseDir $BaseDir
+if (-not $authCsi.Installed) { Write-Error "Secrets backend not available for CSI mount"; exit 1 }
+
+$authCsi.SpcYaml | & kubectl apply -f - 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Error "Failed to apply SecretProviderClass '$($authCsi.SpcName)'"; exit 1 }
+Write-Host "  ✓ SecretProviderClass '$($authCsi.SpcName)' applied" -ForegroundColor Green
+
+# ── 2. Init-script ConfigMap ──────────────────────────────────────────────────
 # The initContainer runs this script on every pod start.
 # Real settings key is "ConnectionManager_connections" (not "connections").
 # Connections are stored as an object keyed by connection id.
 # grep-check on our specific id: if missing → overwrite with our broker only
 # (removes demo connections); if already present → preserve file untouched.
 # Single-quoted PS here-string: $ belongs to the shell, not PowerShell.
-# BROKER_HOST is injected via env var from the initContainer spec below.
+# BROKER_HOST/BROKER_USERNAME are injected via env var from the initContainer
+# spec below; the password is never an env var (would leak via `kubectl
+# describe`) — it's read straight from the CSI-mounted file at runtime.
 $initScript = @'
 #!/bin/sh
 SETTINGS="/app/data/settings.json"
 CONN_KEY="mqtt-broker-shared-infra"
-CONN_JSON=$(printf '{"configVersion":1,"certValidation":true,"clientId":"mqtt-explorer-shared-infra","id":"%s","name":"MQTT Broker (shared-infra)","encryption":false,"subscriptions":[{"topic":"#","qos":0},{"topic":"$SYS/#","qos":0}],"type":"mqtt","host":"%s","port":1883,"protocol":"mqtt"}' \
-  "$CONN_KEY" "$BROKER_HOST")
+BROKER_PASSWORD=$(cat "$BROKER_PASSWORD_FILE")
+CONN_JSON=$(printf '{"configVersion":1,"certValidation":true,"clientId":"mqtt-explorer-shared-infra","id":"%s","name":"MQTT Broker (shared-infra)","encryption":false,"subscriptions":[{"topic":"#","qos":0},{"topic":"$SYS/#","qos":0}],"type":"mqtt","host":"%s","port":1883,"protocol":"mqtt","username":"%s","password":"%s"}' \
+  "$CONN_KEY" "$BROKER_HOST" "$BROKER_USERNAME" "$BROKER_PASSWORD")
 
 if [ ! -f "$SETTINGS" ]; then
   # Fresh install: create file with our broker only
@@ -88,6 +123,12 @@ Write-Host "  ✓ Init-script ConfigMap ready" -ForegroundColor Green
 
 $manifests = @"
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $Name
+  namespace: $Namespace
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: $Name
@@ -115,6 +156,7 @@ spec:
       labels:
         app.kubernetes.io/name: $Name
     spec:
+      serviceAccountName: $Name
       securityContext:
         fsGroup: 1000
       initContainers:
@@ -124,11 +166,18 @@ spec:
           env:
             - name: BROKER_HOST
               value: "$BrokerHost"
+            - name: BROKER_USERNAME
+              value: "$mqttAuthUser"
+            - name: BROKER_PASSWORD_FILE
+              value: "/vault/mqtt-auth/$mqttAuthUser"
           volumeMounts:
             - name: data
               mountPath: /app/data
             - name: init-script
               mountPath: /init-scripts
+              readOnly: true
+            - name: vault-mqtt-auth
+              mountPath: /vault/mqtt-auth
               readOnly: true
       containers:
         - name: mqtt-explorer
@@ -157,6 +206,12 @@ spec:
           configMap:
             name: $Name-init-script
             defaultMode: 0755
+        - name: vault-mqtt-auth
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: $($authCsi.SpcName)
 ---
 apiVersion: v1
 kind: Service
@@ -235,8 +290,10 @@ if ($exitCode -ne 0) { Write-Error "Rollout did not complete"; exit 1 }
 Write-Host "  ✓ Ready" -ForegroundColor Green
 
 $scheme = if (Get-ClusterIssuerName -Platform $Platform) { "https" } else { "http" }
-Register-PortalEntry -Name "MQTT Explorer" -Url "${scheme}://$Hostname" `
-    -Category "MQTT" -Subtitle "MQTT broker web UI" -Order 11
+$portalIcon = Get-PortalIconDataUri -ScriptRoot $ScriptRoot -IconFile $FullConfig.PortalIcon
+Register-PortalEntry -Name $FullConfig.PortalTitle -Url "${scheme}://$Hostname" `
+    -Category "MQTT" -Subtitle $FullConfig.PortalSubtitle -Order 11 `
+    -LogoUrl $portalIcon
 
 if ($verbose) {
     Write-Host ""
@@ -248,6 +305,8 @@ Write-Host "  ──────────────────────
 Write-Host "  Quick Reference" -ForegroundColor White
 Write-Host "  ──────────────────────────────────────────" -ForegroundColor DarkGray
 Write-Host "  URL:       ${scheme}://$Hostname" -ForegroundColor Yellow
+Write-Host "  Broker credential pre-seeded into the saved connection (user: $mqttAuthUser)" -ForegroundColor Yellow
+Write-Host "  Retrieve:  bao kv get $mqttAuthUser $mqttAuthVaultPath" -ForegroundColor Gray
 Write-Host "  ──────────────────────────────────────────" -ForegroundColor DarkGray
 
 Write-Host "`n========================================" -ForegroundColor Cyan

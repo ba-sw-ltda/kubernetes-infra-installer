@@ -3,6 +3,7 @@
     Name        = "mqtt-broker"   # generic — stable across a broker swap (see RadioGroup below)
     DisplayName = "Mosquitto (active/passive/passive HA via Redis)"
     ChartPath   = "_charts\mosquitto-ha"
+    RancherProject  = "Shared Infrastructure"
     RadioGroup      = "mqtt-broker"   # mutually exclusive with 10-mqtt-emqx
     RadioGroupLabel = "MQTT-Broker"   # shown as the group checkbox in Install-Infra.ps1's selection screen
     RadioDefault    = $true           # matches the pre-decided architecture (active/passive/passive)
