@@ -61,8 +61,10 @@ $usernames  = @("default") + @($AclUsers.Username)
 $passwords  = [ordered]@{}
 $generated  = @()
 
+$existingSecrets = Get-ClusterSecret -Path $vaultPath -Keys $usernames -Platform $Platform -BaseDir $BaseDir
+
 foreach ($user in $usernames) {
-    $existing = Read-ClusterSecret -Path $vaultPath -Key $user -Platform $Platform -BaseDir $BaseDir
+    $existing = $existingSecrets[$user]
     if ($existing) {
         $passwords[$user] = $existing
     } else {

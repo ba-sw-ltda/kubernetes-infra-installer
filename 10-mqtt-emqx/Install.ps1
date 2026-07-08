@@ -105,8 +105,9 @@ if ($installedChart -eq $siblingExpectedChart) {
 $mqttAuthVaultPath = "$Namespace/mqtt-client-auth"
 $mqttAuthUser = "explorer"
 $authCsi = $null
-$existingMqttAuthPassword = Read-ClusterSecret -Path $mqttAuthVaultPath -Key "explorer" -Platform $Platform -BaseDir $BaseDir
-$existingBootstrapCsv     = Read-ClusterSecret -Path $mqttAuthVaultPath -Key "bootstrap.csv" -Platform $Platform -BaseDir $BaseDir
+$existingMqttAuth         = Get-ClusterSecret -Path $mqttAuthVaultPath -Keys @("explorer", "bootstrap.csv") -Platform $Platform -BaseDir $BaseDir
+$existingMqttAuthPassword = $existingMqttAuth["explorer"]
+$existingBootstrapCsv     = $existingMqttAuth["bootstrap.csv"]
 if (-not $existingMqttAuthPassword -or -not $existingBootstrapCsv) {
     Write-Host "  · Preparing MQTT client credential for '$mqttAuthUser'..." -ForegroundColor DarkGray
     $mqttAuthPassword = if ($existingMqttAuthPassword) { $existingMqttAuthPassword } else {
@@ -167,12 +168,14 @@ $tlsCsi = $null
 $mqttHostname = if ($Domain) { "mqtt.$Domain" } else { "" }
 if ($mqttHostname -and (Get-ClusterIssuerName -Platform $Platform)) {
     $tlsVaultPath = "$Namespace/emqx-tls"
-    if (-not (Read-ClusterSecret -Path $tlsVaultPath -Key "certificate" -Platform $Platform -BaseDir $BaseDir)) {
+    $existingTls = Get-ClusterSecret -Path $tlsVaultPath -Keys @("certificate") -Platform $Platform -BaseDir $BaseDir
+    if (-not $existingTls["certificate"]) {
         Write-Host "  · Issuing TLS certificate for '$mqttHostname' from OpenBao PKI..." -ForegroundColor DarkGray
         $cert = New-PkiServerCert -CommonName $mqttHostname -Platform $Platform -BaseDir $BaseDir
         if ($cert) {
             $ok = Write-ClusterSecret -Path $tlsVaultPath -Data $cert -Platform $Platform -BaseDir $BaseDir
             if (-not $ok) { Write-Warning "  Failed to store TLS certificate in Vault — continuing without MQTT TLS" }
+            else { $existingTls = $cert }
         } else {
             Write-Warning "  Could not issue TLS certificate from OpenBao PKI — continuing without MQTT TLS"
         }
@@ -180,7 +183,7 @@ if ($mqttHostname -and (Get-ClusterIssuerName -Platform $Platform)) {
         Write-Host "  ✓ TLS certificate for '$mqttHostname' already in Vault — reusing" -ForegroundColor Green
     }
 
-    if (Read-ClusterSecret -Path $tlsVaultPath -Key "certificate" -Platform $Platform -BaseDir $BaseDir) {
+    if ($existingTls["certificate"]) {
         $tlsCsi = New-CsiSecretMount -AppName "emqx-tls" -VaultPath $tlsVaultPath -Keys @("certificate", "private_key", "issuing_ca") `
             -Namespace $Namespace -ServiceAccount $FullConfig.Name -Platform $Platform -MountPath "/vault/tls" -BaseDir $BaseDir
         if ($tlsCsi.Installed) {
@@ -236,7 +239,7 @@ Reset-StuckHelmRelease -ReleaseName $FullConfig.Name -Namespace $Namespace
 # displayed to the user. Reusing the Vault-stored value keeps what's shown
 # in sync with what's actually live.
 $dashboardAuthVaultPath = "$Namespace/emqx-dashboard-auth"
-$existingDashboardPassword = Read-ClusterSecret -Path $dashboardAuthVaultPath -Key "admin" -Platform $Platform -BaseDir $BaseDir
+$existingDashboardPassword = (Get-ClusterSecret -Path $dashboardAuthVaultPath -Keys @("admin") -Platform $Platform -BaseDir $BaseDir)["admin"]
 if ($existingDashboardPassword) {
     $DashboardPassword = $existingDashboardPassword
 } else {

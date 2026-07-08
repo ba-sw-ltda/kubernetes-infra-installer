@@ -64,7 +64,7 @@ Set-RancherProjectAssignment -Namespace $Namespace -ProjectName $FullConfig.Ranc
 # Read-only consumer of the credential the broker already generated/stored —
 # error out clearly rather than silently pre-seeding an unauthenticated
 # connection if a broker hasn't been installed yet.
-if (-not (Read-ClusterSecret -Path $mqttAuthVaultPath -Key $mqttAuthUser -Platform $Platform -BaseDir $BaseDir)) {
+if (-not (Get-ClusterSecret -Path $mqttAuthVaultPath -Keys @($mqttAuthUser) -Platform $Platform -BaseDir $BaseDir)[$mqttAuthUser]) {
     Write-Error "MQTT client credential '$mqttAuthUser' nicht in Vault gefunden ('$mqttAuthVaultPath') — wurde 10-mqtt-mosquitto oder 10-mqtt-emqx installiert?"
     exit 1
 }

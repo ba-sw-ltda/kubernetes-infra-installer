@@ -108,7 +108,7 @@ if ($installedChart -eq $siblingExpectedChart) {
 & kubectl get svc "$redisName-master" -n $RedisNamespace 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Error "Redis Service '$redisName-master' nicht gefunden in Namespace '$RedisNamespace' — wurde 20-redis installiert?"; exit 1 }
 
-if (-not (Read-ClusterSecret -Path $vaultPath -Key $redisAclUser -Platform $Platform -BaseDir $BaseDir)) {
+if (-not (Get-ClusterSecret -Path $vaultPath -Keys @($redisAclUser) -Platform $Platform -BaseDir $BaseDir)[$redisAclUser]) {
     Write-Error "Redis ACL user '$redisAclUser' nicht in Vault gefunden ('$vaultPath') — wurde 20-redis installiert?"
     exit 1
 }
@@ -123,10 +123,10 @@ if ($LASTEXITCODE -ne 0) { Write-Error "Failed to apply SecretProviderClass '$($
 Write-Host "  ✓ SecretProviderClass '$($csi.SpcName)' applied" -ForegroundColor Green
 
 # ── MQTT client authentication (username/password) — generated once and reused
-# on every subsequent install/upgrade (guarded by Read-ClusterSecret, same
+# on every subsequent install/upgrade (guarded by Get-ClusterSecret, same
 # generate-if-missing convention as the Redis ACL / TLS cert provisioning
 # above), never handled as a Kubernetes Secret at any point.
-if (-not (Read-ClusterSecret -Path $mqttAuthVaultPath -Key $mqttAuthUser -Platform $Platform -BaseDir $BaseDir)) {
+if (-not (Get-ClusterSecret -Path $mqttAuthVaultPath -Keys @($mqttAuthUser) -Platform $Platform -BaseDir $BaseDir)[$mqttAuthUser]) {
     Write-Host "  · Generating MQTT client credential for '$mqttAuthUser'..." -ForegroundColor DarkGray
     $mqttAuthPassword = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
     $ok = Write-ClusterSecret -Path $mqttAuthVaultPath -Data @{ $mqttAuthUser = $mqttAuthPassword } -Platform $Platform -BaseDir $BaseDir
@@ -153,12 +153,14 @@ $tlsCsi = $null
 $mqttHostname = if ($Domain) { "mqtt.$Domain" } else { "" }
 if ($mqttHostname -and (Get-ClusterIssuerName -Platform $Platform)) {
     $tlsVaultPath = "$Namespace/mosquitto-tls"
-    if (-not (Read-ClusterSecret -Path $tlsVaultPath -Key "certificate" -Platform $Platform -BaseDir $BaseDir)) {
+    $existingTls = Get-ClusterSecret -Path $tlsVaultPath -Keys @("certificate") -Platform $Platform -BaseDir $BaseDir
+    if (-not $existingTls["certificate"]) {
         Write-Host "  · Issuing TLS certificate for '$mqttHostname' from OpenBao PKI..." -ForegroundColor DarkGray
         $cert = New-PkiServerCert -CommonName $mqttHostname -Platform $Platform -BaseDir $BaseDir
         if ($cert) {
             $ok = Write-ClusterSecret -Path $tlsVaultPath -Data $cert -Platform $Platform -BaseDir $BaseDir
             if (-not $ok) { Write-Warning "  Failed to store TLS certificate in Vault — continuing without MQTT TLS" }
+            else { $existingTls = $cert }
         } else {
             Write-Warning "  Could not issue TLS certificate from OpenBao PKI — continuing without MQTT TLS"
         }
@@ -166,7 +168,7 @@ if ($mqttHostname -and (Get-ClusterIssuerName -Platform $Platform)) {
         Write-Host "  ✓ TLS certificate for '$mqttHostname' already in Vault — reusing" -ForegroundColor Green
     }
 
-    if (Read-ClusterSecret -Path $tlsVaultPath -Key "certificate" -Platform $Platform -BaseDir $BaseDir) {
+    if ($existingTls["certificate"]) {
         $tlsCsi = New-CsiSecretMount -AppName "mosquitto-tls" -VaultPath $tlsVaultPath -Keys @("certificate", "private_key", "issuing_ca") `
             -Namespace $Namespace -ServiceAccount $FullConfig.Name -Platform $Platform -MountPath "/vault/tls" -BaseDir $BaseDir
         if ($tlsCsi.Installed) {
